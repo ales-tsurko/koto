@@ -195,6 +195,15 @@ impl Vm {
     }
 
     pub fn run_function(&mut self, function: &RuntimeFunction, args: &[Value]) -> RuntimeResult {
+        self.run_instance_function(None, function, args)
+    }
+
+    pub fn run_instance_function(
+        &mut self,
+        instance: Option<Value>,
+        function: &RuntimeFunction,
+        args: &[Value],
+    ) -> RuntimeResult {
         if !self.call_stack.is_empty() {
             return vm_error!(
                 self.chunk(),
@@ -203,34 +212,25 @@ impl Vm {
             );
         }
 
-        let current_chunk = self.chunk();
-        let current_ip = self.ip();
-
-        if args.len() as u8 != function.arg_count {
-            return vm_error!(
-                self.chunk(),
-                self.ip(),
-                "Incorrect argument count, expected {}, found {}",
-                function.arg_count,
-                args.len(),
-            );
-        }
-
-        let frame_base = if let Some(frame) = self.call_stack.last() {
-            frame.register_base
+        let frame_base = 0;
+        let instance_register = if instance.is_some() {
+            Some(frame_base)
         } else {
-            0
+            None
         };
 
-        let arg_register = (self.value_stack.len() - frame_base) as u8;
+        self.value_stack.clear();
+        self.value_stack.push(instance.unwrap_or(Value::Empty)); // frame base
         self.value_stack.extend_from_slice(args);
 
-        self.push_frame(
-            function.chunk.clone(),
-            function.ip,
-            arg_register,
-            function.captures.clone(),
-        );
+        self.call_function(
+            frame_base,
+            Value::Function(function.clone()),
+            frame_base,
+            args.len() as u8,
+            instance_register,
+            0,
+        )?;
 
         self.frame_mut().catch_barrier = true;
 
@@ -238,9 +238,6 @@ impl Vm {
         if result.is_err() {
             self.pop_frame(Value::Empty)?;
         }
-
-        self.set_chunk_and_ip(current_chunk, current_ip);
-
         result
     }
 
@@ -2379,8 +2376,10 @@ impl Vm {
                 // Clone the instance register into the first register of the frame
                 let adjusted_frame_base = if instance_function {
                     if let Some(instance_register) = instance_register {
-                        let instance = self.clone_register(instance_register);
-                        self.set_register(frame_base, instance);
+                        if instance_register != frame_base {
+                            let instance = self.clone_register(instance_register);
+                            self.set_register(frame_base, instance);
+                        }
                         frame_base
                     } else {
                         return vm_error!(
@@ -2426,8 +2425,10 @@ impl Vm {
                     );
                 }
 
-                // Set info for when the current frame is returned to
-                self.frame_mut().return_register_and_ip = Some((result_register, self.ip()));
+                if !self.call_stack.is_empty() {
+                    // Set info for when the current frame is returned to
+                    self.frame_mut().return_register_and_ip = Some((result_register, self.ip()));
+                }
 
                 // Set up a new frame for the called function
                 self.push_frame(chunk, function_ip, adjusted_frame_base, captures);
