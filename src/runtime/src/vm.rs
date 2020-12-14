@@ -1128,14 +1128,87 @@ impl Vm {
         Ok(())
     }
 
-    fn run_negate(&mut self, register: u8, value: u8, instruction_ip: usize) -> InstructionResult {
+    fn call_overloaded_unary_op(
+        &mut self,
+        result_register: u8,
+        map_register: u8,
+        map: ValueMap,
+        op_id: &str,
+        instruction_ip: usize,
+    ) -> InstructionResult {
+        let op = match map.data().get_with_string(op_id) {
+            Some(op) => op.clone(),
+            None => return vm_error!(self.chunk(), instruction_ip, "Missing {} operation", op_id),
+        };
+
+        // Set up the call registers at end of stack
+        let stack_len = self.value_stack.len();
+        let frame_base = (stack_len - self.register_base()) as u8;
+        self.value_stack.push(Value::Empty); // frame_base
+        self.call_function(
+            result_register,
+            op,
+            frame_base,
+            0, // no args
+            Some(map_register),
+            instruction_ip,
+        )?;
+        Ok(())
+    }
+
+    fn call_overloaded_binary_op(
+        &mut self,
+        result_register: u8,
+        map_register: u8,
+        map: ValueMap,
+        rhs: Value,
+        op_id: &str,
+        instruction_ip: usize,
+    ) -> InstructionResult {
+        let op = match map.data().get_with_string(op_id) {
+            Some(op) => op.clone(),
+            None => return vm_error!(self.chunk(), instruction_ip, "Missing {} operation", op_id),
+        };
+
+        // Set up the call registers at end of stack
+        let stack_len = self.value_stack.len();
+        let frame_base = (stack_len - self.register_base()) as u8;
+        self.value_stack.push(Value::Empty); // frame_base
+        self.value_stack.push(rhs); // arg
+        self.call_function(
+            result_register,
+            op,
+            frame_base,
+            1, // 1 arg, the rhs value
+            Some(map_register),
+            instruction_ip,
+        )?;
+        Ok(())
+    }
+
+    fn run_negate(
+        &mut self,
+        result_register: u8,
+        value_register: u8,
+        instruction_ip: usize,
+    ) -> InstructionResult {
         use Value::*;
 
-        let result = match &self.get_register(value) {
+        let result = match &self.get_register(value_register) {
             Bool(b) => Bool(!b),
             Number(n) => Number(-n),
             Num2(v) => Num2(-v),
             Num4(v) => Num4(-v),
+            Map(map) if map.data().contains_str_key("@negate") => {
+                let map = map.clone();
+                return self.call_overloaded_unary_op(
+                    result_register,
+                    value_register,
+                    map,
+                    "@negate",
+                    instruction_ip,
+                );
+            }
             unexpected => {
                 return self.unexpected_type_error(
                     "Negate: expected negatable value",
@@ -1144,7 +1217,7 @@ impl Vm {
                 );
             }
         };
-        self.set_register(register, result);
+        self.set_register(result_register, result);
 
         Ok(())
     }
@@ -1159,9 +1232,7 @@ impl Vm {
     ) -> InstructionResult {
         use Value::*;
 
-        let lhs_value = self.get_register(lhs);
-        let rhs_value = self.get_register(rhs);
-        let result = match (lhs_value, rhs_value) {
+        let result = match (self.get_register(lhs), self.get_register(rhs)) {
             (Number(a), Number(b)) => Number(a + b),
             (Number(a), Num2(b)) => Num2(a + b),
             (Num2(a), Num2(b)) => Num2(a + b),
@@ -1179,16 +1250,28 @@ impl Vm {
                 result.extend(a.data().iter().chain(b.data().iter()).cloned());
                 List(ValueList::with_data(result))
             }
+            (Str(a), Str(b)) => {
+                let result = a.to_string() + b.as_ref();
+                Str(result.into())
+            }
+            (Map(map), value) if map.data().contains_str_key("@+") => {
+                let map = map.clone();
+                let value = value.clone();
+                return self.call_overloaded_binary_op(
+                    register,
+                    lhs,
+                    map,
+                    value,
+                    "@+",
+                    instruction_ip,
+                );
+            }
             (Map(a), Map(b)) => {
                 let mut result = a.data().clone();
                 result.extend(&b.data());
                 Map(ValueMap::with_data(result))
             }
-            (Str(a), Str(b)) => {
-                let result = a.to_string() + b.as_ref();
-                Str(result.into())
-            }
-            _ => {
+            (lhs_value, rhs_value) => {
                 return self.binary_op_error(lhs_value, rhs_value, instruction, instruction_ip);
             }
         };
@@ -1207,9 +1290,7 @@ impl Vm {
     ) -> InstructionResult {
         use Value::*;
 
-        let lhs_value = self.get_register(lhs);
-        let rhs_value = self.get_register(rhs);
-        let result = match (lhs_value, rhs_value) {
+        let result = match (self.get_register(lhs), self.get_register(rhs)) {
             (Number(a), Number(b)) => Number(a - b),
             (Number(a), Num2(b)) => Num2(a - b),
             (Num2(a), Num2(b)) => Num2(a - b),
@@ -1217,7 +1298,19 @@ impl Vm {
             (Number(a), Num4(b)) => Num4(a - b),
             (Num4(a), Num4(b)) => Num4(a - b),
             (Num4(a), Number(b)) => Num4(a - b),
-            _ => {
+            (Map(map), value) if map.data().contains_str_key("@-") => {
+                let map = map.clone();
+                let value = value.clone();
+                return self.call_overloaded_binary_op(
+                    register,
+                    lhs,
+                    map,
+                    value,
+                    "@-",
+                    instruction_ip,
+                );
+            }
+            (lhs_value, rhs_value) => {
                 return self.binary_op_error(lhs_value, rhs_value, instruction, instruction_ip);
             }
         };
@@ -1236,9 +1329,7 @@ impl Vm {
     ) -> InstructionResult {
         use Value::*;
 
-        let lhs_value = self.get_register(lhs);
-        let rhs_value = self.get_register(rhs);
-        let result = match (lhs_value, rhs_value) {
+        let result = match (self.get_register(lhs), self.get_register(rhs)) {
             (Number(a), Number(b)) => Number(a * b),
             (Number(a), Num2(b)) => Num2(a * b),
             (Num2(a), Num2(b)) => Num2(a * b),
@@ -1246,7 +1337,19 @@ impl Vm {
             (Number(a), Num4(b)) => Num4(a * b),
             (Num4(a), Num4(b)) => Num4(a * b),
             (Num4(a), Number(b)) => Num4(a * b),
-            _ => {
+            (Map(map), value) if map.data().contains_str_key("@*") => {
+                let map = map.clone();
+                let value = value.clone();
+                return self.call_overloaded_binary_op(
+                    register,
+                    lhs,
+                    map,
+                    value,
+                    "@*",
+                    instruction_ip,
+                );
+            }
+            (lhs_value, rhs_value) => {
                 return self.binary_op_error(lhs_value, rhs_value, instruction, instruction_ip);
             }
         };
@@ -1265,9 +1368,7 @@ impl Vm {
     ) -> InstructionResult {
         use Value::*;
 
-        let lhs_value = self.get_register(lhs);
-        let rhs_value = self.get_register(rhs);
-        let result = match (lhs_value, rhs_value) {
+        let result = match (self.get_register(lhs), self.get_register(rhs)) {
             (Number(a), Number(b)) => Number(a / b),
             (Number(a), Num2(b)) => Num2(a / b),
             (Num2(a), Num2(b)) => Num2(a / b),
@@ -1275,7 +1376,19 @@ impl Vm {
             (Number(a), Num4(b)) => Num4(a / b),
             (Num4(a), Num4(b)) => Num4(a / b),
             (Num4(a), Number(b)) => Num4(a / b),
-            _ => {
+            (Map(map), value) if map.data().contains_str_key("@/") => {
+                let map = map.clone();
+                let value = value.clone();
+                return self.call_overloaded_binary_op(
+                    register,
+                    lhs,
+                    map,
+                    value,
+                    "@/",
+                    instruction_ip,
+                );
+            }
+            (lhs_value, rhs_value) => {
                 return self.binary_op_error(lhs_value, rhs_value, instruction, instruction_ip);
             }
         };
@@ -1294,9 +1407,7 @@ impl Vm {
     ) -> InstructionResult {
         use Value::*;
 
-        let lhs_value = self.get_register(lhs);
-        let rhs_value = self.get_register(rhs);
-        let result = match (lhs_value, rhs_value) {
+        let result = match (self.get_register(lhs), self.get_register(rhs)) {
             (Number(a), Number(b)) => Number(a % b),
             (Number(a), Num2(b)) => Num2(a % b),
             (Num2(a), Num2(b)) => Num2(a % b),
@@ -1304,7 +1415,19 @@ impl Vm {
             (Number(a), Num4(b)) => Num4(a % b),
             (Num4(a), Num4(b)) => Num4(a % b),
             (Num4(a), Number(b)) => Num4(a % b),
-            _ => {
+            (Map(map), value) if map.data().contains_str_key("@%") => {
+                let map = map.clone();
+                let value = value.clone();
+                return self.call_overloaded_binary_op(
+                    register,
+                    lhs,
+                    map,
+                    value,
+                    "@%",
+                    instruction_ip,
+                );
+            }
+            (lhs_value, rhs_value) => {
                 return self.binary_op_error(lhs_value, rhs_value, instruction, instruction_ip);
             }
         };
@@ -1323,12 +1446,22 @@ impl Vm {
     ) -> InstructionResult {
         use Value::*;
 
-        let lhs_value = self.get_register(lhs);
-        let rhs_value = self.get_register(rhs);
-        let result = match (lhs_value, rhs_value) {
+        let result = match (self.get_register(lhs), self.get_register(rhs)) {
             (Number(a), Number(b)) => Bool(a < b),
             (Str(a), Str(b)) => Bool(a.as_str() < b.as_str()),
-            _ => {
+            (Map(map), value) if map.data().contains_str_key("@<") => {
+                let map = map.clone();
+                let value = value.clone();
+                return self.call_overloaded_binary_op(
+                    register,
+                    lhs,
+                    map,
+                    value,
+                    "@<",
+                    instruction_ip,
+                );
+            }
+            (lhs_value, rhs_value) => {
                 return self.binary_op_error(lhs_value, rhs_value, instruction, instruction_ip);
             }
         };
@@ -1347,12 +1480,22 @@ impl Vm {
     ) -> InstructionResult {
         use Value::*;
 
-        let lhs_value = self.get_register(lhs);
-        let rhs_value = self.get_register(rhs);
-        let result = match (lhs_value, rhs_value) {
+        let result = match (self.get_register(lhs), self.get_register(rhs)) {
             (Number(a), Number(b)) => Bool(a <= b),
             (Str(a), Str(b)) => Bool(a.as_str() <= b.as_str()),
-            _ => {
+            (Map(map), value) if map.data().contains_str_key("@<=") => {
+                let map = map.clone();
+                let value = value.clone();
+                return self.call_overloaded_binary_op(
+                    register,
+                    lhs,
+                    map,
+                    value,
+                    "@<=",
+                    instruction_ip,
+                );
+            }
+            (lhs_value, rhs_value) => {
                 return self.binary_op_error(lhs_value, rhs_value, instruction, instruction_ip);
             }
         };
@@ -1371,12 +1514,22 @@ impl Vm {
     ) -> InstructionResult {
         use Value::*;
 
-        let lhs_value = self.get_register(lhs);
-        let rhs_value = self.get_register(rhs);
-        let result = match (lhs_value, rhs_value) {
+        let result = match (self.get_register(lhs), self.get_register(rhs)) {
             (Number(a), Number(b)) => Bool(a > b),
             (Str(a), Str(b)) => Bool(a.as_str() > b.as_str()),
-            _ => {
+            (Map(map), value) if map.data().contains_str_key("@>") => {
+                let map = map.clone();
+                let value = value.clone();
+                return self.call_overloaded_binary_op(
+                    register,
+                    lhs,
+                    map,
+                    value,
+                    "@>",
+                    instruction_ip,
+                );
+            }
+            (lhs_value, rhs_value) => {
                 return self.binary_op_error(lhs_value, rhs_value, instruction, instruction_ip);
             }
         };
@@ -1395,12 +1548,22 @@ impl Vm {
     ) -> InstructionResult {
         use Value::*;
 
-        let lhs_value = self.get_register(lhs);
-        let rhs_value = self.get_register(rhs);
-        let result = match (lhs_value, rhs_value) {
+        let result = match (self.get_register(lhs), self.get_register(rhs)) {
             (Number(a), Number(b)) => Bool(a >= b),
             (Str(a), Str(b)) => Bool(a.as_str() >= b.as_str()),
-            _ => {
+            (Map(map), value) if map.data().contains_str_key("@>=") => {
+                let map = map.clone();
+                let value = value.clone();
+                return self.call_overloaded_binary_op(
+                    register,
+                    lhs,
+                    map,
+                    value,
+                    "@>=",
+                    instruction_ip,
+                );
+            }
+            (lhs_value, rhs_value) => {
                 return self.binary_op_error(lhs_value, rhs_value, instruction, instruction_ip);
             }
         };
@@ -1412,6 +1575,7 @@ impl Vm {
     fn run_equal(&mut self, register: u8, lhs: u8, rhs: u8) -> InstructionResult {
         let lhs_value = self.get_register(lhs);
         let rhs_value = self.get_register(rhs);
+        // match lhs_value
         let result = (lhs_value == rhs_value).into();
         self.set_register(register, result);
         Ok(())

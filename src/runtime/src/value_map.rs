@@ -171,6 +171,11 @@ impl ValueHashMap {
     }
 
     #[inline]
+    pub fn contains_str_key(&self, key: &str) -> bool {
+        self.0.contains_key(&key as &dyn ValueMapKey)
+    }
+
+    #[inline]
     pub fn keys(&self) -> Keys<'_, Value, Value> {
         self.0.keys()
     }
